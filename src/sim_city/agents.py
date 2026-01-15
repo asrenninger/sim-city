@@ -216,8 +216,9 @@ class Population:
 
         if city_type == "monocentric":
             pts = self.spatial._gaussian_mixture(n, centers=[(0.0, 0.0)], sigmas=[4.5])
-            # All from single center = all zone 0 (Center)
-            zones = np.zeros(n, dtype=int)
+            # Assign zones geometrically based on position (not generative component)
+            # This partitions into 5 zones: Center + 4 peripheral quadrants
+            zones, _ = self.spatial._assign_zones(pts[:, 0], pts[:, 1], mid_box=2.0)
             return pts, zones
 
         elif city_type in ["polycentric", "composite"]:

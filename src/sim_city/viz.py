@@ -165,78 +165,89 @@ class DiagnosticsSuite:
 
     def plot_all(self, save_path: str | None = None) -> plt.Figure:
         """Generate all diagnostic plots in a single figure."""
-        fig = plt.figure(figsize=(16, 20))
-        gs = GridSpec(
-            4,
-            3,
-            figure=fig,
-            hspace=0.35,
-            wspace=0.25,
-            left=0.06,
-            right=0.94,
-            top=0.94,
-            bottom=0.04,
-        )
+        # Temporarily disable interactive mode to prevent double display in notebooks
+        was_interactive = plt.isinteractive()
+        plt.ioff()
 
-        # Row 1: Network and Spatial
-        ax1 = fig.add_subplot(gs[0, 0])
-        self._plot_network_simple(ax1)
+        try:
+            fig = plt.figure(figsize=(16, 20))
+            gs = GridSpec(
+                4,
+                3,
+                figure=fig,
+                hspace=0.35,
+                wspace=0.25,
+                left=0.06,
+                right=0.94,
+                top=0.94,
+                bottom=0.04,
+            )
 
-        ax2 = fig.add_subplot(gs[0, 1])
-        self._plot_poi_distribution(ax2)
+            # Row 1: Network and Spatial
+            ax1 = fig.add_subplot(gs[0, 0])
+            self._plot_network_simple(ax1)
 
-        ax3 = fig.add_subplot(gs[0, 2])
-        self._plot_isolation_map(ax3)
+            ax2 = fig.add_subplot(gs[0, 1])
+            self._plot_poi_distribution(ax2)
 
-        # Row 2: Evolution
-        ax4 = fig.add_subplot(gs[1, 0])
-        self._plot_isolation_evolution(ax4)
+            ax3 = fig.add_subplot(gs[0, 2])
+            self._plot_isolation_map(ax3)
 
-        ax5 = fig.add_subplot(gs[1, 1])
-        self._plot_location_accumulation(ax5)
+            # Row 2: Evolution
+            ax4 = fig.add_subplot(gs[1, 0])
+            self._plot_isolation_evolution(ax4)
 
-        ax6 = fig.add_subplot(gs[1, 2])
-        self._plot_rg_evolution(ax6)
+            ax5 = fig.add_subplot(gs[1, 1])
+            self._plot_location_accumulation(ax5)
 
-        # Row 3: Distributions
-        ax7 = fig.add_subplot(gs[2, 0])
-        self._plot_isolation_distribution(ax7)
+            ax6 = fig.add_subplot(gs[1, 2])
+            self._plot_rg_evolution(ax6)
 
-        ax8 = fig.add_subplot(gs[2, 1])
-        self._plot_zipf(ax8)
+            # Row 3: Distributions
+            ax7 = fig.add_subplot(gs[2, 0])
+            self._plot_isolation_distribution(ax7)
 
-        ax9 = fig.add_subplot(gs[2, 2])
-        self._plot_rg_distribution(ax9)
+            ax8 = fig.add_subplot(gs[2, 1])
+            self._plot_zipf(ax8)
 
-        # Row 4: Exposure and Zone comparison
-        ax10 = fig.add_subplot(gs[3, 0])
-        self._plot_exposure_heatmap(ax10)
+            ax9 = fig.add_subplot(gs[2, 2])
+            self._plot_rg_distribution(ax9)
 
-        ax11 = fig.add_subplot(gs[3, 1])
-        self._plot_zone_isolation_evolution(ax11)
+            # Row 4: Exposure and Zone comparison
+            ax10 = fig.add_subplot(gs[3, 0])
+            self._plot_exposure_heatmap(ax10)
 
-        ax12 = fig.add_subplot(gs[3, 2])
-        self._plot_summary_stats(ax12)
+            ax11 = fig.add_subplot(gs[3, 1])
+            self._plot_zone_isolation_evolution(ax11)
 
-        # Main title
-        config_str = self.config.describe()
-        fig.suptitle(
-            "Mobility Simulation Diagnostics",
-            fontsize=16,
-            fontweight="bold",
-            color=COLORS["dark"],
-            y=0.98,
-        )
-        fig.text(0.5, 0.955, config_str, ha="center", fontsize=9, color=COLORS["mid"])
+            ax12 = fig.add_subplot(gs[3, 2])
+            self._plot_summary_stats(ax12)
 
-        _add_source_note(fig, y=0.01)
+            # Main title
+            config_str = self.config.describe()
+            fig.suptitle(
+                "Mobility Simulation Diagnostics",
+                fontsize=16,
+                fontweight="bold",
+                color=COLORS["dark"],
+                y=0.98,
+            )
+            fig.text(
+                0.5, 0.955, config_str, ha="center", fontsize=9, color=COLORS["mid"]
+            )
 
-        if save_path:
-            plt.savefig(save_path, dpi=300, facecolor="white")
-            print(f"Saved to {save_path}")
+            _add_source_note(fig, y=0.01)
 
-        plt.show()
-        return fig
+            if save_path:
+                plt.savefig(save_path, dpi=300, facecolor="white")
+                print(f"Saved to {save_path}")
+
+            return fig
+
+        finally:
+            # Restore interactive mode if it was on
+            if was_interactive:
+                plt.ion()
 
     def _plot_network_simple(self, ax):
         """Simple network visualization."""
@@ -589,9 +600,9 @@ class DiagnosticsSuite:
             ("Total visits", f"{int(self.V.sum()):,}"),
             ("", ""),
             ("Mechanisms", ""),
-            ("EPR", "✓" if self.config.use_epr else "✗"),
-            ("Recency", "✓" if self.config.use_recency else "✗"),
-            ("Capacity", "✓" if self.config.enforce_capacity else "✗"),
+            ("EPR", "Yes" if self.config.use_epr else "No"),
+            ("Recency", "Yes" if self.config.use_recency else "No"),
+            ("Capacity", "Yes" if self.config.enforce_capacity else "No"),
         ]
 
         y = 0.95
