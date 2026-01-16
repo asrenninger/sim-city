@@ -111,6 +111,35 @@ class SimulationConfig:
     use_income_stratification: bool = False
     use_gender_effects: bool = False
 
+    # --- Spatial Structure ---
+    # Decouple amenity vs workplace spatial patterns for counterfactual scenarios
+    # e.g., "15-min city for daily life but CBD for work"
+    amenity_structure: str = "polycentric"  # monocentric, polycentric, urban_villages
+    workplace_structure: str = "polycentric"  # monocentric, polycentric, urban_villages
+
+    # Concentration parameters (CBD weight in Gaussian mixture)
+    # Higher = more concentration in central business district
+    amenity_cbd_weight: float = 1.5  # Default: slight CBD emphasis
+    workplace_cbd_weight: float = 4.0  # Default: jobs more concentrated than amenities
+
+    # Clustering tightness (Gaussian sigma)
+    amenity_sigma: float = 0.8  # Spread of amenity clusters
+    workplace_sigma: float = 0.5  # Tighter clustering for workplaces
+
+    # --- Work Anchors ---
+    use_work_anchors: bool = False  # Master toggle for home+work dual anchors
+    n_workplaces: int = 100  # Number of workplace locations
+
+    # Employment
+    employment_rate: float = 0.67  # Fraction of agents who are employed
+
+    # Work assignment (gravity model)
+    work_gravity_beta: float = 1.5  # Distance decay for commute assignment
+
+    # Work share distribution (Beta distribution for trip allocation)
+    work_share_mean: float = 0.36  # Mean fraction of trips that are work-anchored
+    work_share_concentration: float = 5.0  # Beta concentration parameter
+
     # --- Simulation Parameters ---
     n_timesteps: int = 100
     burnin_steps: int = 20
@@ -127,6 +156,14 @@ class SimulationConfig:
     def describe(self) -> str:
         """Return human-readable description of active mechanisms."""
         active = []
+
+        # Spatial structure
+        if self.amenity_structure == self.workplace_structure:
+            active.append(f"Structure: {self.amenity_structure}")
+        else:
+            active.append(
+                f"Structure: amenities={self.amenity_structure}, work={self.workplace_structure}"
+            )
 
         # Handle both enum value and string
         if isinstance(self.destination_model, DestinationModel):
@@ -147,6 +184,10 @@ class SimulationConfig:
             active.append(f"CityScaling(δ={self.schlaepfer_delta})")
         if self.use_returner_explorer:
             active.append(f"RetExp(frac={self.returner_fraction})")
+        if self.use_work_anchors:
+            active.append(
+                f"WorkAnchors(emp={self.employment_rate:.0%}, ws={self.work_share_mean:.2f})"
+            )
         return " | ".join(active)
 
 
@@ -277,12 +318,14 @@ class MobilitySimulation:
         self.exposure_df: pd.DataFrame | None = None
         self.isolation_df: pd.DataFrame | None = None
 
-    def setup(self, city_type: str = "polycentric") -> "MobilitySimulation":
+    def setup(self, city_type: str | None = None) -> "MobilitySimulation":
         """
         Initialize all simulation components.
 
         Args:
-            city_type: One of 'monocentric', 'polycentric', 'composite', 'urban_villages'
+            city_type: DEPRECATED. Use config.amenity_structure and config.workplace_structure.
+                       If provided, overrides both amenity and workplace structure for
+                       backward compatibility.
 
         Returns:
             self for method chaining
@@ -297,13 +340,29 @@ class MobilitySimulation:
 
         # Spatial environment
         self.spatial = SpatialEnvironment(self.config)
-        self.poi_df = self.spatial.generate_synthetic_city(city_type)
-        print(f"  Generated {len(self.spatial.pois)} POIs")
 
-        # Population
+        # Generate amenities (POIs) - use city_type override if provided for backward compat
+        self.poi_df = self.spatial.generate_synthetic_city(city_type=city_type)
+        print(f"  Generated {len(self.spatial.pois)} POIs ({self.config.amenity_structure})")
+
+        # Generate workplaces if using work anchors
+        self.workplace_df: pd.DataFrame | None = None
+        if self.config.use_work_anchors:
+            self.workplace_df = self.spatial.generate_workplaces(city_type=city_type)
+            print(f"  Generated {len(self.spatial.workplaces)} workplaces ({self.config.workplace_structure})")
+
+        # Population (follows amenity structure by default)
         self.population = Population(self.config, self.spatial)
-        self.agent_df = self.population.generate_population(city_type)
+        self.agent_df = self.population.generate_population(city_type=city_type)
         print(f"  Generated {len(self.population.agents)} agents")
+
+        # Assign employment if using work anchors
+        if self.config.use_work_anchors:
+            self.population._assign_employment()
+            n_employed = sum(a.is_employed for a in self.population.agents)
+            print(f"  Employment: {n_employed}/{len(self.population.agents)} ({n_employed/len(self.population.agents):.1%})")
+            # Update agent dataframe with employment info
+            self.agent_df = self.population.get_agent_dataframe()
 
         # Destination model
         self.destination_model = get_destination_model(self.config)
@@ -317,9 +376,26 @@ class MobilitySimulation:
 
         # EPR engine
         self.epr_engine = EPREngine(self.config, self.destination_model, self.spatial)
-        self.epr_engine.set_distance_matrix(
-            self.population.agent_coords, self.spatial.poi_coords
-        )
+
+        # Set up distance matrices
+        if self.config.use_work_anchors:
+            # Dual distance matrices for home and work anchors
+            work_coords = np.array([
+                [a.work_x, a.work_y] if a.is_employed else [np.nan, np.nan]
+                for a in self.population.agents
+            ])
+            employed_mask = np.array([a.is_employed for a in self.population.agents])
+            self.epr_engine.set_dual_distance_matrices(
+                self.population.agent_coords,
+                work_coords,
+                self.spatial.poi_coords,
+                employed_mask,
+            )
+        else:
+            # Standard home-only distance matrix
+            self.epr_engine.set_distance_matrix(
+                self.population.agent_coords, self.spatial.poi_coords
+            )
 
         # Metrics calculator
         self.metrics = MetricsCalculator(self.population, self.spatial)

@@ -206,8 +206,13 @@ class EPREngine:
         self.spatial = spatial
         self.rng = np.random.default_rng(config.seed)
 
-        # Precompute distance matrix (agents × POIs)
+        # Precompute distance matrix (agents × POIs) - home-based
         self._distance_matrix: np.ndarray | None = None
+
+        # Dual anchor support
+        self._home_distance_matrix: np.ndarray | None = None
+        self._work_distance_matrix: np.ndarray | None = None
+        self._employed_mask: np.ndarray | None = None
 
     def set_distance_matrix(
         self, agent_coords: np.ndarray, poi_coords: np.ndarray
@@ -218,6 +223,51 @@ class EPREngine:
         dy = agent_coords[:, 1, np.newaxis] - poi_coords[np.newaxis, :, 1]
         self._distance_matrix = np.sqrt(dx**2 + dy**2)
 
+    def set_dual_distance_matrices(
+        self,
+        home_coords: np.ndarray,
+        work_coords: np.ndarray,
+        poi_coords: np.ndarray,
+        employed_mask: np.ndarray,
+    ) -> None:
+        """
+        Precompute distance matrices from both home and work anchors.
+
+        Args:
+            home_coords: (n_agents, 2) array of home coordinates
+            work_coords: (n_agents, 2) array of work coordinates (NaN for unemployed)
+            poi_coords: (n_pois, 2) array of POI coordinates
+            employed_mask: (n_agents,) boolean array indicating employment
+        """
+        self._employed_mask = employed_mask
+
+        # Home distances (all agents)
+        dx = home_coords[:, 0, np.newaxis] - poi_coords[np.newaxis, :, 0]
+        dy = home_coords[:, 1, np.newaxis] - poi_coords[np.newaxis, :, 1]
+        self._home_distance_matrix = np.sqrt(dx**2 + dy**2)
+
+        # Also set the regular distance matrix for backward compatibility
+        self._distance_matrix = self._home_distance_matrix
+
+        # Work distances (only for employed agents)
+        n_agents = len(home_coords)
+        n_pois = len(poi_coords)
+        self._work_distance_matrix = np.full((n_agents, n_pois), np.inf)
+
+        if employed_mask.any():
+            employed_work_coords = work_coords[employed_mask]
+            dx_work = (
+                employed_work_coords[:, 0, np.newaxis]
+                - poi_coords[np.newaxis, :, 0]
+            )
+            dy_work = (
+                employed_work_coords[:, 1, np.newaxis]
+                - poi_coords[np.newaxis, :, 1]
+            )
+            self._work_distance_matrix[employed_mask] = np.sqrt(
+                dx_work**2 + dy_work**2
+            )
+
     def step(self, agent: "Agent", agent_idx: int, timestep: int) -> str:
         """
         Execute one mobility step for an agent.
@@ -226,9 +276,16 @@ class EPREngine:
         """
         S = agent.state.n_unique_locations
 
+        # Determine anchor for this trip (home vs work)
+        use_work_anchor = (
+            self.config.use_work_anchors
+            and agent.is_employed
+            and self.rng.random() < agent.work_share
+        )
+
         if S == 0:
             # First visit: must explore
-            return self._explore(agent, agent_idx, timestep)
+            return self._explore(agent, agent_idx, timestep, use_work_anchor)
 
         # Exploration probability
         p_explore = agent.rho * (S ** (-agent.gamma))
@@ -238,13 +295,34 @@ class EPREngine:
             p_explore = 0.0
 
         if self.rng.random() < p_explore:
-            return self._explore(agent, agent_idx, timestep)
+            return self._explore(agent, agent_idx, timestep, use_work_anchor)
         else:
+            # Return uses unified visited set - anchor doesn't matter
             return self._preferential_return(agent, timestep)
 
-    def _explore(self, agent: "Agent", agent_idx: int, timestep: int) -> str:
-        """Select a new location to explore."""
-        distances = self._distance_matrix[agent_idx]
+    def _explore(
+        self,
+        agent: "Agent",
+        agent_idx: int,
+        timestep: int,
+        use_work_anchor: bool = False,
+    ) -> str:
+        """
+        Select a new location to explore.
+
+        Args:
+            agent: The agent exploring
+            agent_idx: Index of the agent in the population
+            timestep: Current simulation timestep
+            use_work_anchor: If True, compute distances from work location
+        """
+        # Select distance vector based on anchor
+        if use_work_anchor and self._work_distance_matrix is not None:
+            distances = self._work_distance_matrix[agent_idx]
+        elif self._home_distance_matrix is not None:
+            distances = self._home_distance_matrix[agent_idx]
+        else:
+            distances = self._distance_matrix[agent_idx]
 
         # Get base probabilities from destination model
         probs = self.destination_model.compute_probabilities(

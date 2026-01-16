@@ -57,28 +57,42 @@ class SpatialEnvironment:
         self.zones: list[Zone] = []
         self.poi_coords: np.ndarray | None = None  # (n_pois, 2)
 
-    def generate_synthetic_city(self, city_type: str = "polycentric") -> pd.DataFrame:
+        # Workplaces (generated separately if use_work_anchors=True)
+        self.workplaces: list[Location] = []
+        self.workplace_coords: np.ndarray | None = None  # (n_workplaces, 2)
+
+    def generate_synthetic_city(
+        self,
+        city_type: str | None = None,
+        cbd_weight: float | None = None,
+        sigma: float | None = None,
+    ) -> pd.DataFrame:
         """
-        Generate a synthetic city layout.
+        Generate a synthetic city layout for amenities/POIs.
 
         Args:
-            city_type: "monocentric", "polycentric", "composite", "urban_villages"
+            city_type: "monocentric", "polycentric", "urban_villages"
+                       If None, uses config.amenity_structure
+            cbd_weight: CBD concentration weight. If None, uses config.amenity_cbd_weight
+            sigma: Cluster spread. If None, uses config.amenity_sigma
 
         Returns:
             DataFrame of POIs
         """
-        generators = {
-            "monocentric": self._make_monocentric,
-            "polycentric": self._make_polycentric,
-            "composite": self._make_composite,
-            "urban_villages": self._make_urban_villages,
-        }
+        # Use config defaults if not specified
+        city_type = city_type or self.config.amenity_structure
+        cbd_weight = cbd_weight if cbd_weight is not None else self.config.amenity_cbd_weight
+        sigma = sigma if sigma is not None else self.config.amenity_sigma
 
-        if city_type not in generators:
+        # Map to generator functions (pass params)
+        if city_type == "monocentric":
+            poi_pts, zone_ids = self._make_monocentric(sigma=sigma)
+        elif city_type == "polycentric":
+            poi_pts, zone_ids = self._make_polycentric(cbd_weight=cbd_weight, sigma=sigma)
+        elif city_type == "urban_villages":
+            poi_pts, zone_ids = self._make_urban_villages(sigma=sigma)
+        else:
             raise ValueError(f"Unknown city type: {city_type}")
-
-        # Generators now return (points, zone_ids)
-        poi_pts, zone_ids = generators[city_type]()
 
         # Zone names
         zone_names_map = {0: "Center", 1: "NW", 2: "NE", 3: "SE", 4: "SW"}
@@ -160,27 +174,38 @@ class SpatialEnvironment:
             return pts, comp
         return pts
 
-    def _make_monocentric(self) -> tuple[np.ndarray, np.ndarray]:
+    def _make_monocentric(
+        self, sigma: float = 1.5, n: int | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Single CBD with tight POI clustering. Zones assigned geometrically."""
-        pts = self._gaussian_mixture(
-            self.config.n_pois, centers=[(0.0, 0.0)], sigmas=[1.5]
-        )
+        n = n or self.config.n_pois
+        pts = self._gaussian_mixture(n, centers=[(0.0, 0.0)], sigmas=[sigma])
         # Assign zones geometrically based on position (not generative component)
         # This partitions into 5 zones: Center + 4 peripheral quadrants
         zone_ids, _ = self._assign_zones(pts[:, 0], pts[:, 1], mid_box=2.0)
         return pts, zone_ids
 
-    def _make_polycentric(self) -> tuple[np.ndarray, np.ndarray]:
-        """Multiple centers with slight CBD emphasis."""
+    def _make_polycentric(
+        self, cbd_weight: float = 1.5, sigma: float = 0.8, n: int | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Multiple centers with configurable CBD emphasis.
+
+        Args:
+            cbd_weight: Weight for central cluster (1.0 = equal to periphery)
+            sigma: Gaussian spread for each cluster
+            n: Number of points (defaults to config.n_pois)
+        """
+        n = n or self.config.n_pois
         a = self.config.city_extent * 0.6
         # Order: NW, NE, SE, SW, Center
         centers = [(-a, a), (a, a), (a, -a), (-a, -a), (0.0, 0.0)]
 
         pts, components = self._gaussian_mixture(
-            self.config.n_pois,
+            n,
             centers=centers,
-            sigmas=[0.8] * 5,
-            weights=[1, 1, 1, 1, 1.5],
+            sigmas=[sigma] * 5,
+            weights=[1, 1, 1, 1, cbd_weight],
             return_components=True,
         )
 
@@ -191,28 +216,20 @@ class SpatialEnvironment:
 
         return pts, zones
 
-    def _make_composite(self) -> tuple[np.ndarray, np.ndarray]:
-        """Polycentric population but CBD-heavy amenities."""
-        a = self.config.city_extent * 0.6
-        # Order: NW, NE, SE, SW, Center
-        centers = [(-a, a), (a, a), (a, -a), (-a, -a), (0.0, 0.0)]
+    def _make_urban_villages(
+        self, sigma: float = 0.5, n: int | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        16-village grid with tight local clustering.
 
-        pts, components = self._gaussian_mixture(
-            self.config.n_pois,
-            centers=centers,
-            sigmas=[0.8] * 5,
-            weights=[1, 1, 1, 1, 6],  # Heavy CBD weight
-            return_components=True,
-        )
+        This is the "15-minute city" structure: amenities distributed
+        evenly across neighborhoods with no CBD emphasis.
 
-        # Map components to zone IDs: Center=0, NW=1, NE=2, SE=3, SW=4
-        component_to_zone = {0: 1, 1: 2, 2: 3, 3: 4, 4: 0}
-        zones = np.array([component_to_zone[c] for c in components])
-
-        return pts, zones
-
-    def _make_urban_villages(self) -> tuple[np.ndarray, np.ndarray]:
-        """16-village grid with tight local clustering."""
+        Args:
+            sigma: Gaussian spread for each village cluster
+            n: Number of points (defaults to config.n_pois)
+        """
+        n = n or self.config.n_pois
         xs = [-6, -2, 2, 6]
         ys = [-6, -2, 2, 6]
         centers = [(x, y) for y in ys for x in xs]
@@ -233,16 +250,16 @@ class SpatialEnvironment:
             else:  # x < 0 and y < 0
                 village_to_zone.append(4)  # SW
 
-        # Distribute POIs across villages, handling remainder
-        base_count = self.config.n_pois // n_villages
-        remainder = self.config.n_pois % n_villages
+        # Distribute points across villages, handling remainder
+        base_count = n // n_villages
+        remainder = n % n_villages
         counts = [base_count + (1 if i < remainder else 0) for i in range(n_villages)]
 
         pts_list = []
         zones_list = []
         for i, center in enumerate(centers):
             if counts[i] > 0:
-                pts = self._gaussian_mixture(counts[i], [center], [0.5])
+                pts = self._gaussian_mixture(counts[i], [center], [sigma])
                 pts_list.append(pts)
                 # All points from this village get the village's zone
                 zones_list.append(np.full(counts[i], village_to_zone[i], dtype=int))
@@ -284,6 +301,82 @@ class SpatialEnvironment:
                     "attractiveness": p.attractiveness,
                 }
                 for p in self.pois
+            ]
+        )
+
+    def generate_workplaces(
+        self,
+        city_type: str | None = None,
+        cbd_weight: float | None = None,
+        sigma: float | None = None,
+    ) -> pd.DataFrame:
+        """
+        Generate workplace locations.
+
+        Workplaces can have different spatial structure than amenities,
+        enabling scenarios like "15-min city for daily life + CBD for work".
+
+        Args:
+            city_type: "monocentric", "polycentric", "urban_villages"
+                       If None, uses config.workplace_structure
+            cbd_weight: CBD concentration weight. If None, uses config.workplace_cbd_weight
+            sigma: Cluster spread. If None, uses config.workplace_sigma
+
+        Returns:
+            DataFrame of workplace locations
+        """
+        # Use config defaults if not specified
+        city_type = city_type or self.config.workplace_structure
+        cbd_weight = cbd_weight if cbd_weight is not None else self.config.workplace_cbd_weight
+        sigma = sigma if sigma is not None else self.config.workplace_sigma
+        n = self.config.n_workplaces
+
+        zone_names_map = {0: "Center", 1: "NW", 2: "NE", 3: "SE", 4: "SW"}
+
+        # Use the same generators as amenities, just with workplace params
+        if city_type == "monocentric":
+            pts, zone_ids = self._make_monocentric(sigma=sigma, n=n)
+
+        elif city_type == "polycentric":
+            pts, zone_ids = self._make_polycentric(cbd_weight=cbd_weight, sigma=sigma, n=n)
+
+        elif city_type == "urban_villages":
+            pts, zone_ids = self._make_urban_villages(sigma=sigma, n=n)
+
+        else:
+            raise ValueError(f"Unknown city type: {city_type}")
+
+        # Create Location objects with category="workplace"
+        zone_names = np.array([zone_names_map[z] for z in zone_ids])
+        self.workplaces = []
+        for i in range(len(pts)):
+            loc = Location(
+                id=f"work_{i:04d}",
+                x=pts[i, 0],
+                y=pts[i, 1],
+                zone_id=zone_ids[i],
+                zone_name=zone_names[i],
+                attractiveness=self.rng.lognormal(0, 0.7),  # "size" for gravity
+                category="workplace",
+            )
+            self.workplaces.append(loc)
+
+        self.workplace_coords = pts
+        return self.get_workplace_dataframe()
+
+    def get_workplace_dataframe(self) -> pd.DataFrame:
+        """Return workplaces as DataFrame."""
+        return pd.DataFrame(
+            [
+                {
+                    "workplace_id": w.id,
+                    "x": w.x,
+                    "y": w.y,
+                    "zone_id": w.zone_id,
+                    "zone_name": w.zone_name,
+                    "size": w.attractiveness,
+                }
+                for w in self.workplaces
             ]
         )
 

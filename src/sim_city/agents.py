@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+from scipy.spatial.distance import cdist
 
 if TYPE_CHECKING:
     from sim_city.core import SimulationConfig
@@ -96,6 +97,17 @@ class Agent:
     # Individual location capacity (Alessandretti - varies across population)
     location_capacity: int = 25
 
+    # Work location (None if not employed)
+    is_employed: bool = False
+    work_x: float | None = None
+    work_y: float | None = None
+    work_zone_id: int | None = None
+    work_zone_name: str | None = None
+    workplace_id: str | None = None
+
+    # Work share (fraction of trips that are work-anchored, 0 if not employed)
+    work_share: float = 0.0
+
     # State
     state: AgentState = field(default_factory=AgentState)
 
@@ -129,16 +141,20 @@ class Population:
     def __iter__(self):
         return iter(self.agents)
 
-    def generate_population(self, city_type: str = "polycentric") -> pd.DataFrame:
+    def generate_population(self, city_type: str | None = None) -> pd.DataFrame:
         """
         Generate agent population with homes distributed according to city type.
 
         Args:
-            city_type: One of 'monocentric', 'polycentric', 'composite', 'urban_villages'
+            city_type: If None, uses config.amenity_structure (residents live
+                       near amenities). Can override for backward compatibility.
 
         Returns:
             DataFrame with agent information
         """
+        # Default: residents follow amenity distribution (live near amenities)
+        city_type = city_type or self.config.amenity_structure
+
         # Generate home locations with zone assignments from generative process
         home_pts, zone_ids = self._generate_homes(city_type)
 
@@ -282,6 +298,61 @@ class Population:
         else:
             raise ValueError(f"Unknown city type: {city_type}")
 
+    def _assign_employment(self) -> None:
+        """
+        Assign workplaces to agents via gravity model.
+
+        Uses gravity model: P(work at j) ∝ size_j / dist_ij^β
+        Work share sampled from Beta distribution.
+        """
+        if not self.config.use_work_anchors:
+            return
+
+        if not self.spatial.workplaces:
+            raise ValueError(
+                "Workplaces must be generated before assigning employment. "
+                "Call spatial.generate_workplaces() first."
+            )
+
+        n_employed = int(len(self.agents) * self.config.employment_rate)
+        employed_indices = self.rng.choice(
+            len(self.agents), n_employed, replace=False
+        )
+
+        # Precompute home-to-workplace distances
+        workplace_coords = self.spatial.workplace_coords
+        dist_matrix = cdist(self.agent_coords, workplace_coords)
+
+        # Workplace attractiveness (size proxy)
+        sizes = np.array([w.attractiveness for w in self.spatial.workplaces])
+
+        # Beta distribution params for work_share
+        mean_ws = self.config.work_share_mean
+        conc = self.config.work_share_concentration
+        alpha_ws = mean_ws * conc
+        beta_ws = (1 - mean_ws) * conc
+
+        for i in employed_indices:
+            agent = self.agents[i]
+
+            # Gravity model: P(j) ∝ size_j / dist_ij^beta
+            distances = np.maximum(dist_matrix[i], 0.1)  # Avoid division by zero
+            weights = sizes / (distances ** self.config.work_gravity_beta)
+            probs = weights / weights.sum()
+
+            # Sample workplace
+            work_idx = self.rng.choice(len(self.spatial.workplaces), p=probs)
+            workplace = self.spatial.workplaces[work_idx]
+
+            # Assign work attributes
+            agent.is_employed = True
+            agent.work_x = workplace.x
+            agent.work_y = workplace.y
+            agent.work_zone_id = workplace.zone_id
+            agent.work_zone_name = workplace.zone_name
+            agent.workplace_id = workplace.id
+            agent.work_share = float(self.rng.beta(alpha_ws, beta_ws))
+
     def get_agent_dataframe(self) -> pd.DataFrame:
         """Return agents as DataFrame."""
         return pd.DataFrame(
@@ -296,6 +367,14 @@ class Population:
                     "k_rg": a.k_rg,
                     "income_quintile": a.demographics.income_quintile,
                     "gender": a.demographics.gender,
+                    # Work fields
+                    "is_employed": a.is_employed,
+                    "work_x": a.work_x,
+                    "work_y": a.work_y,
+                    "work_zone_id": a.work_zone_id,
+                    "work_zone_name": a.work_zone_name,
+                    "workplace_id": a.workplace_id,
+                    "work_share": a.work_share,
                 }
                 for a in self.agents
             ]
